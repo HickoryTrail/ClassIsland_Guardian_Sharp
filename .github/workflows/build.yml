@@ -1,92 +1,224 @@
 name: Build ClassIsland Guardian
+
 on:
-    workflow_dispatch:
-    push:
-      branches: [ "main" ]
+  workflow_dispatch:
+  push:
+    branches: ["main"]
 
 jobs:
-    build:
-        runs-on: windows-2022
-        steps:
-            - name: Checkout Code
-              uses: actions/checkout@v4
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-            - name: Setup Python
-              uses: actions/setup-python@v5
-              with:
-                  python-version: '3.12'
-            
-            - name: Install dependencies
-              run: pip install pyinstaller && pip install -r src\requirements.txt
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
 
-            - name: Build Python Executable
-              run: |
-                pyinstaller --distpath temp -w -F -n guardian --copy-metadata apscheduler --hidden-import apscheduler.triggers.interval --hidden-import apscheduler.triggers.date --hidden-import apscheduler.executors.pool --hidden-import apscheduler.jobstores.memory --hidden-import tzlocal src\guardian.py
-                pyinstaller --distpath temp -F --copy-metadata readchar -n config src\config.py
-                pyinstaller --distpath temp -F --copy-metadata readchar -n uninstall src\uninstall.py
-                pyinstaller --distpath temp -F -n setup src\setup.py
-                pyinstaller --distpath temp -F -n recovery src\recovery.py
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
 
-            - name: Add MSBuild to PATH
-              uses: microsoft/setup-msbuild@v2
-            
-            - name: Build drivers Executable
-              run: msbuild drivers\drivers.slnx /p:Configuration=Release /p:Platform=x64
+      - name: Verify Python and legacy launcher are absent
+        shell: pwsh
+        run: |
+          $pythonFiles = @(Get-ChildItem . -Recurse -File -Filter *.py -Force |
+            Where-Object { $_.FullName -notlike '*\.git\*' })
+          if ($pythonFiles.Count -ne 0) {
+            throw "Python source files are not allowed: $($pythonFiles -join ', ')"
+          }
+          if (Test-Path launcher) {
+            throw "The legacy launcher directory must not exist."
+          }
+          $legacyPattern = ('py' + 'installer|actions/setup-' + 'python|pip' + ' install')
+          $legacyReferences = rg -n -i $legacyPattern .github src
+          if ($LASTEXITCODE -eq 0) {
+            throw "Legacy Python build references are not allowed: $($legacyReferences -join [Environment]::NewLine)"
+          }
+          if ($LASTEXITCODE -gt 1) {
+            throw "Source audit failed."
+          }
 
-            - name: Build launcher Executable
-              run: msbuild launcher\launcher.slnx /p:Configuration=Release /p:Platform="Any CPU"
-            
-            - name: Cache recovery base
-              id: cache-base
-              uses: actions/cache@v4
-              with:
-                  path: temp\base.wim
-                  key: recovery-base-1
+      - name: Build C# solution and run self-tests
+        shell: pwsh
+        run: |
+          dotnet build ClassIslandGuardian.slnx -c Release --disable-build-servers
+          if ($LASTEXITCODE -ne 0) { throw "C# build failed." }
+          dotnet run --project tests\ClassIslandGuardian.Tests\ClassIslandGuardian.Tests.csproj -c Release --no-build
+          if ($LASTEXITCODE -ne 0) { throw "C# self-tests failed." }
 
-            - name: Download recovery base (base.wim)
-              if: steps.cache-base.outputs.cache-hit != 'true'
-              shell: pwsh
-              run: |
-                  New-Item -ItemType Directory -Force -Path temp | Out-Null
-                  $base = "https://github.com/${{ github.repository }}/releases/download/recovery-base"
-                  curl.exe -L --retry 3 -o temp\base.wim "$base/base.wim"
-                  if ($LASTEXITCODE -ne 0) { throw "下载 base.wim 失败" }
-                  if (-not (Test-Path "temp\base.wim") -or (Get-Item "temp\base.wim").Length -lt 100MB) { throw "base.wim 异常（过小或缺失）" }
-                  Write-Host "base.wim: $([math]::Round((Get-Item temp\base.wim).Length/1MB,1)) MB [OK]"
+      - name: Build drivers
+        shell: pwsh
+        run: |
+          msbuild drivers\drivers.slnx /p:Configuration=Release /p:Platform=x64
+          if ($LASTEXITCODE -ne 0) { throw "Driver build failed." }
 
-            - name: Build recovery.wim
-              shell: pwsh
-              run: |
-                  Copy-Item temp\base.wim temp\base_work.wim -Force
-                  New-Item -ItemType Directory -Force -Path temp\mount | Out-Null
-                  dism /Mount-Wim /WimFile:temp\base_work.wim /Index:1 /MountDir:temp\mount /Quiet
-                  if ($LASTEXITCODE -ne 0) { throw "DISM 挂载失败" }
-                  Copy-Item temp\recovery.exe temp\mount\Windows\System32\recovery.exe -Force
-                  Copy-Item src\startnet.cmd temp\mount\Windows\System32\startnet.cmd -Force
-                  Write-Host "已注入 recovery.exe + startnet.cmd"
-                  dism /Unmount-Wim /MountDir:temp\mount /Commit /Quiet
-                  if ($LASTEXITCODE -ne 0) { throw "DISM 提交失败" }
-                  Copy-Item temp\base_work.wim temp\recovery.wim -Force
-                  Write-Host "recovery.wim: $([math]::Round((Get-Item temp\recovery.wim).Length/1MB,1)) MB [OK]"
-                  
-            - name: Create App Directory
-              run: |
-                mkdir app
-                mkdir app\drivers
-                mkdir app\appdata
-                mkdir app\recovery
-                copy /y temp\guardian.exe app\appdata\
-                copy /y temp\config.exe app\appdata\
-                copy /y temp\uninstall.exe app\appdata\
-                copy /y temp\setup.exe app
-                copy /y temp\recovery.wim app\recovery\
-                copy /y drivers\x64\Release\*.sys app\drivers\
-                copy /y launcher\bin\Release\launcher.exe app\appdata\
-              shell: cmd
+      - name: Publish NativeAOT executables
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path temp\publish\guardian, temp\publish\recovery | Out-Null
+          dotnet publish src\ClassIslandGuardian.Guardian\ClassIslandGuardian.Guardian.csproj -c Release -r win-x64 --self-contained true -p:StripSymbols=true -o temp\publish\guardian
+          if ($LASTEXITCODE -ne 0) { throw "Guardian NativeAOT publish failed." }
+          dotnet publish src\ClassIslandGuardian.Recovery\ClassIslandGuardian.Recovery.csproj -c Release -r win-x64 --self-contained true -p:StripSymbols=true -o temp\publish\recovery
+          if ($LASTEXITCODE -ne 0) { throw "Recovery NativeAOT publish failed." }
 
-            - name: Upload Build Artifact
-              uses: actions/upload-artifact@v4
-              with:
-                  name: build-artifact
-                  path: app
+      - name: Verify NativeAOT publish closure
+        shell: pwsh
+        run: |
+          $dumpbin = Get-Command dumpbin.exe -ErrorAction SilentlyContinue
+          if ($null -eq $dumpbin) {
+            $visualStudioRoots = @(
+              (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)) 'Microsoft Visual Studio')
+              (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)) 'Microsoft Visual Studio')
+            ) | Where-Object { Test-Path $_ }
+            $dumpbinPath = @(
+              foreach ($visualStudioRoot in $visualStudioRoots) {
+                Get-ChildItem $visualStudioRoot -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue
+              }
+            ) |
+              Where-Object { $_.FullName -like '*\Hostx64\x64\dumpbin.exe' } |
+              Select-Object -Last 1 -ExpandProperty FullName
+            if ($null -eq $dumpbinPath) { throw "dumpbin.exe was not found." }
+          }
+          foreach ($application in @(
+            @{ Name = 'guardian'; Directory = 'temp\publish\guardian' },
+            @{ Name = 'recovery'; Directory = 'temp\publish\recovery' }
+          )) {
+            $executable = Join-Path $application.Directory "$($application.Name).exe"
+            if (-not (Test-Path $executable)) {
+              throw "Missing $executable"
+            }
+            $extraRuntimeFiles = @(Get-ChildItem $application.Directory -File | Where-Object {
+              $_.Name -ne "$($application.Name).exe" -and $_.Extension -ne '.pdb'
+            })
+            if ($extraRuntimeFiles.Count -ne 0) {
+              throw "Unexpected runtime files next to $($application.Name).exe: $($extraRuntimeFiles.Name -join ', ')"
+            }
+            $dependencies = if ($null -ne $dumpbin) {
+              & $dumpbin.Source /DEPENDENTS $executable | Out-String
+            }
+            else {
+              & $dumpbinPath /DEPENDENTS $executable | Out-String
+            }
+            if ($dependencies -match '(?i)hostfxr|hostpolicy|coreclr|e_sqlite3|python') {
+              throw "$($application.Name).exe has a forbidden runtime dependency.$([Environment]::NewLine)$dependencies"
+            }
+            if ($application.Name -eq 'recovery') {
+              $bytes = [IO.File]::ReadAllBytes((Resolve-Path $executable))
+              $containsWindowsSqlite = [Text.Encoding]::ASCII.GetString($bytes).Contains('winsqlite3', [StringComparison]::OrdinalIgnoreCase) -or
+                [Text.Encoding]::Unicode.GetString($bytes).Contains('winsqlite3', [StringComparison]::OrdinalIgnoreCase)
+              if ($containsWindowsSqlite) {
+                throw "recovery.exe must not reference winsqlite3.dll."
+              }
+            }
+            if ($application.Name -eq 'guardian') {
+              & $executable help
+              if ($LASTEXITCODE -ne 0) {
+                throw "guardian.exe help failed after NativeAOT publish."
+              }
+            }
+          }
 
+      - name: Cache recovery base
+        id: cache-base
+        uses: actions/cache@v4
+        with:
+          path: temp\base.wim
+          key: recovery-base-1
+
+      - name: Download recovery base
+        if: steps.cache-base.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path temp | Out-Null
+          $base = "https://github.com/${{ github.repository }}/releases/download/recovery-base/base.wim"
+          curl.exe -L --retry 3 -o temp\base.wim $base
+          if ($LASTEXITCODE -ne 0) { throw "Downloading base.wim failed." }
+          if (-not (Test-Path temp\base.wim) -or (Get-Item temp\base.wim).Length -lt 100MB) {
+            throw "base.wim is missing or unexpectedly small."
+          }
+
+      - name: Verify recovery base
+        shell: pwsh
+        run: |
+          if (-not (Test-Path temp\base.wim) -or (Get-Item temp\base.wim).Length -lt 100MB) {
+            throw "Cached base.wim is missing or unexpectedly small."
+          }
+
+      - name: Build and verify recovery.wim
+        shell: pwsh
+        run: |
+          Copy-Item temp\base.wim temp\base_work.wim -Force
+          New-Item -ItemType Directory -Force -Path temp\mount, temp\verify-mount | Out-Null
+          $recoverySource = Resolve-Path temp\publish\recovery\recovery.exe
+          $expectedHash = (Get-FileHash $recoverySource -Algorithm SHA256).Hash
+          $mounted = $false
+          try {
+            dism.exe /Mount-Wim /WimFile:temp\base_work.wim /Index:1 /MountDir:temp\mount /Quiet
+            if ($LASTEXITCODE -ne 0) { throw "DISM mount failed." }
+            $mounted = $true
+            Copy-Item $recoverySource temp\mount\Windows\System32\recovery.exe -Force
+            Copy-Item src\startnet.cmd temp\mount\Windows\System32\startnet.cmd -Force
+            $injectedHash = (Get-FileHash temp\mount\Windows\System32\recovery.exe -Algorithm SHA256).Hash
+            if ($injectedHash -ne $expectedHash) { throw "Injected recovery.exe hash mismatch." }
+            $startnet = Get-Content temp\mount\Windows\System32\startnet.cmd -Raw
+            if ($startnet -notmatch [regex]::Escape('X:\Windows\System32\recovery.exe')) {
+              throw "startnet.cmd does not invoke recovery.exe."
+            }
+            dism.exe /Unmount-Wim /MountDir:temp\mount /Commit /Quiet
+            if ($LASTEXITCODE -ne 0) { throw "DISM commit failed." }
+            $mounted = $false
+          }
+          finally {
+            if ($mounted) {
+              dism.exe /Unmount-Wim /MountDir:temp\mount /Discard /Quiet
+            }
+          }
+
+          $verifiedMounted = $false
+          try {
+            dism.exe /Mount-Wim /WimFile:temp\base_work.wim /Index:1 /MountDir:temp\verify-mount /ReadOnly /Quiet
+            if ($LASTEXITCODE -ne 0) { throw "Post-commit verification mount failed." }
+            $verifiedMounted = $true
+            $verifiedHash = (Get-FileHash temp\verify-mount\Windows\System32\recovery.exe -Algorithm SHA256).Hash
+            if ($verifiedHash -ne $expectedHash) { throw "Committed recovery.exe hash mismatch." }
+            $verifiedStartnet = Get-Content temp\verify-mount\Windows\System32\startnet.cmd -Raw
+            if ($verifiedStartnet -notmatch [regex]::Escape('X:\Windows\System32\recovery.exe')) {
+              throw "Committed startnet.cmd does not invoke recovery.exe."
+            }
+          }
+          finally {
+            if ($verifiedMounted) {
+              dism.exe /Unmount-Wim /MountDir:temp\verify-mount /Discard /Quiet
+            }
+          }
+          Copy-Item temp\base_work.wim temp\recovery.wim -Force
+
+      - name: Create release package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path app\drivers, app\recovery | Out-Null
+          Copy-Item temp\publish\guardian\guardian.exe app\guardian.exe -Force
+          Copy-Item temp\recovery.wim app\recovery\recovery.wim -Force
+          Copy-Item drivers\x64\Release\file.sys app\drivers\file.sys -Force
+          Copy-Item drivers\x64\Release\process.sys app\drivers\process.sys -Force
+          Copy-Item drivers\x64\Release\registry.sys app\drivers\registry.sys -Force
+          $forbidden = @(Get-ChildItem app -Recurse -File | Where-Object {
+            $_.Name -in @('launcher.exe', 'config.exe', 'setup.exe', 'uninstall.exe') -or
+            $_.Extension -in @('.py', '.dll')
+          })
+          if ($forbidden.Count -ne 0) {
+            throw "Release package contains forbidden files: $($forbidden.FullName -join ', ')"
+          }
+          $expected = @('guardian.exe', 'recovery.wim', 'file.sys', 'process.sys', 'registry.sys')
+          $actual = @(Get-ChildItem app -Recurse -File | ForEach-Object Name)
+          if ($actual.Count -ne $expected.Count -or @($expected | Where-Object { $_ -notin $actual }).Count -ne 0) {
+            throw "Release package contents are incomplete: $($actual -join ', ')"
+          }
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifact
+          path: app

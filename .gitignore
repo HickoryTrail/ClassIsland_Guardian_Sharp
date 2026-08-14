@@ -1,12 +1,10 @@
-__pycache__/
-*.pyc
-*.pyo
-
 build/
 dist/
-*.spec
 build_temp/
 app/
+.artifacts/
+bin/
+obj/
 
 *.log
 *.wim

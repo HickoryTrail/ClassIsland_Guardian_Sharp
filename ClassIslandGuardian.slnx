@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="src\ClassIslandGuardian.Common\ClassIslandGuardian.Common.csproj" />
+  <Project Path="src\ClassIslandGuardian.Guardian\ClassIslandGuardian.Guardian.csproj" />
+  <Project Path="src\ClassIslandGuardian.Recovery\ClassIslandGuardian.Recovery.csproj" />
+  <Project Path="tests\ClassIslandGuardian.Tests\ClassIslandGuardian.Tests.csproj" />
+</Solution>

@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>recovery</AssemblyName>
+    <RootNamespace>ClassIslandGuardian.Recovery</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ClassIslandGuardian.Common\ClassIslandGuardian.Common.csproj" />
+  </ItemGroup>
+</Project>

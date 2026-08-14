@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <PublishAot>false</PublishAot>
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <SelfContained>true</SelfContained>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ClassIslandGuardian.Common\ClassIslandGuardian.Common.csproj" />
+    <ProjectReference Include="..\..\src\ClassIslandGuardian.Guardian\ClassIslandGuardian.Guardian.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\..\src\ClassIslandGuardian.Recovery\RecoveryEngine.cs" Link="RecoveryEngine.cs" />
+  </ItemGroup>
+</Project>

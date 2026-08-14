@@ -13,7 +13,6 @@
 #pragma data_seg("NONPAGED")
 // 白名单
 UNICODE_STRING g_guardianExePath = { 0 };
-UNICODE_STRING g_configExePath = { 0 };
 // 保护
 UNICODE_STRING g_guardianRecoveryPath = { 0 };
 UNICODE_STRING g_guardianPath = { 0 };
@@ -157,18 +156,6 @@ DriverEntry(
         g_guardianExePath.MaximumLength = (USHORT)sizeof(L"\\DEVICE\\HARDDISKVOLUME*\\PROGRAM FILES\\GUARDIAN\\GUARDIAN.EXE");
     }
 
-    // configExePath
-    buffer = (PWCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED,
-        sizeof(L"\\DEVICE\\HARDDISKVOLUME*\\PROGRAM FILES\\GUARDIAN\\CONFIG.EXE"),
-        'CIGP');
-    if (buffer) {
-        RtlCopyMemory(buffer, L"\\DEVICE\\HARDDISKVOLUME*\\PROGRAM FILES\\GUARDIAN\\CONFIG.EXE",
-            sizeof(L"\\DEVICE\\HARDDISKVOLUME*\\PROGRAM FILES\\GUARDIAN\\CONFIG.EXE"));
-        g_configExePath.Buffer = buffer;
-        g_configExePath.Length = (USHORT)(sizeof(L"\\DEVICE\\HARDDISKVOLUME*\\PROGRAM FILES\\GUARDIAN\\CONFIG.EXE") - sizeof(WCHAR));
-        g_configExePath.MaximumLength = (USHORT)sizeof(L"\\DEVICE\\HARDDISKVOLUME*\\PROGRAM FILES\\GUARDIAN\\CONFIG.EXE");
-    }
-
     status = FltRegisterFilter(DriverObject,
         &FilterRegistration,
         &CIGFileFilterData.FilterHandle);
@@ -210,7 +197,7 @@ BOOLEAN IsProcessTrusted(VOID) {
             WCHAR saveProcessPath_buf[128];
             RtlInitEmptyUnicodeString(&saveProcessPath, saveProcessPath_buf, 128 * sizeof(WCHAR));
             RtlCopyUnicodeString(&saveProcessPath, processPath);
-            if (FsRtlIsNameInExpression(&g_guardianExePath, &saveProcessPath, TRUE, NULL) || FsRtlIsNameInExpression(&g_configExePath, &saveProcessPath, TRUE, NULL)) {
+            if (FsRtlIsNameInExpression(&g_guardianExePath, &saveProcessPath, TRUE, NULL)) {
                 ExFreePool(processPath);
                 return TRUE;
             }
