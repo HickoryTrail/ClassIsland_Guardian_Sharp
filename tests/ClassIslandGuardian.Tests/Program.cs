@@ -14,6 +14,7 @@ public static class Program
             FileLogPreservesLegacyLineLayout();
             PasswordVerificationPreservesLegacySha256Semantics();
             GuardianCommandRoutingIsExplicit();
+            ManagementPauseEventRejectsUntrustedExistingEvent();
             SnapshotCreateRestoreAndDelete();
             ApplicationSelectionPrefersCurrentThenNewestVersion();
             BcdManagerParsesEnglishAndChineseEntries();
@@ -95,6 +96,30 @@ public static class Program
         Assert(GuardianCommandLine.ParseCommand(["uninstall"]) == GuardianCommand.Uninstall, "Uninstall command routing failed.");
         Assert(GuardianCommandLine.ParseCommand(["cleanup-uninstall"]) == GuardianCommand.CleanupUninstall, "Cleanup command routing failed.");
         Assert(GuardianCommandLine.ParseCommand(["unexpected"]) == GuardianCommand.Unknown, "Unknown command routing failed.");
+    }
+
+    private static void ManagementPauseEventRejectsUntrustedExistingEvent()
+    {
+        using var fixture = new TemporaryDirectory();
+        var eventName = $"ClassIslandGuardian_ManagementActive_Test_{Guid.NewGuid():N}";
+        using var untrustedEvent = new EventWaitHandle(false, EventResetMode.AutoReset, eventName, out var createdNew);
+        Assert(createdNew, "The test management event should be newly created.");
+
+        using var serviceEvent = ManagementPauseSignal.CreateForService(new FileLog(Path.Combine(fixture.Path, "guardian.log")), eventName);
+        serviceEvent.Set();
+        Assert(!untrustedEvent.WaitOne(0), "The service must not accept a pre-existing event with an untrusted ACL.");
+
+        var rejected = false;
+        try
+        {
+            using var lease = ManagementPauseSignal.Acquire(eventName);
+        }
+        catch (InvalidOperationException)
+        {
+            rejected = true;
+        }
+
+        Assert(rejected, "Management must reject an existing event with an untrusted ACL.");
     }
 
     private static void BcdManagerParsesEnglishAndChineseEntries()

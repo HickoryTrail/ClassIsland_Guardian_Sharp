@@ -8,46 +8,93 @@ public static class ManagementPauseSignal
 {
     public const string EventName = "Global\\ClassIslandGuardian_ManagementActive";
 
-    public static EventWaitHandle CreateForService(FileLog log)
+    public static EventWaitHandle CreateForService(FileLog log) => CreateForService(log, EventName);
+
+    internal static EventWaitHandle CreateForService(FileLog log, string eventName)
     {
         try
         {
-            return EventWaitHandleAcl.Create(
-                initialState: false,
-                EventResetMode.AutoReset,
-                EventName,
-                out _,
-                CreateSecurity());
+            return CreateProtectedEvent(eventName);
         }
         catch (Exception exception)
         {
-            // Do not honor a signal that could not be opened with the expected ACL.
+            // Do not honor a pre-existing signal unless it has the expected ACL.
             log.Error("Failed to create the protected management event", exception);
             return new EventWaitHandle(false, EventResetMode.AutoReset);
         }
     }
 
-    public static ManagementPauseLease Acquire()
+    public static ManagementPauseLease Acquire() => Acquire(EventName);
+
+    internal static ManagementPauseLease Acquire(string eventName)
     {
         EventWaitHandle signal;
         if (!EventWaitHandleAcl.TryOpenExisting(
-                EventName,
-                EventWaitHandleRights.Modify | EventWaitHandleRights.Synchronize,
+                eventName,
+                EventWaitHandleRights.Modify | EventWaitHandleRights.Synchronize | EventWaitHandleRights.ReadPermissions,
                 out var existing))
         {
-            signal = EventWaitHandleAcl.Create(
-                initialState: false,
-                EventResetMode.AutoReset,
-                EventName,
-                out _,
-                CreateSecurity());
+            signal = CreateProtectedEvent(eventName);
         }
         else
         {
             signal = existing;
+            try
+            {
+                VerifyExpectedSecurity(signal);
+            }
+            catch
+            {
+                signal.Dispose();
+                throw;
+            }
         }
 
         return new ManagementPauseLease(signal);
+    }
+
+    private static EventWaitHandle CreateProtectedEvent(string eventName)
+    {
+        var signal = EventWaitHandleAcl.Create(
+            initialState: false,
+            EventResetMode.AutoReset,
+            eventName,
+            out _,
+            CreateSecurity());
+        try
+        {
+            VerifyExpectedSecurity(signal);
+            return signal;
+        }
+        catch
+        {
+            signal.Dispose();
+            throw;
+        }
+    }
+
+    private static void VerifyExpectedSecurity(EventWaitHandle signal)
+    {
+        var security = EventWaitHandleAcl.GetAccessControl(signal);
+        var rules = security.GetAccessRules(includeExplicit: true, includeInherited: false, targetType: typeof(SecurityIdentifier))
+            .OfType<EventWaitHandleAccessRule>()
+            .ToArray();
+        var expectedIdentities = new[]
+        {
+            new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+            new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null)
+        };
+
+        var isExpected = security.AreAccessRulesProtected &&
+                         rules.Length == expectedIdentities.Length &&
+                         expectedIdentities.All(identity => rules.Any(rule =>
+                             rule.AccessControlType == AccessControlType.Allow &&
+                             rule.EventWaitHandleRights == EventWaitHandleRights.FullControl &&
+                             rule.IdentityReference.Equals(identity)));
+        if (!isExpected)
+        {
+            throw new InvalidOperationException("The management event does not have the required protected ACL.");
+        }
     }
 
     private static EventWaitHandleSecurity CreateSecurity()

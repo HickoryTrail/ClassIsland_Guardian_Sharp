@@ -97,7 +97,21 @@ public sealed class ClassIslandProcessManager
             return false;
         }
 
-        var tempRoot = Path.Combine(Path.GetTempPath(), "cig_" + Guid.NewGuid().ToString("N"));
+        string tempRoot;
+        if (asActiveUser)
+        {
+            if (!SessionProcessLauncher.TryCreateActiveUserTemporaryDirectory("cig_", out tempRoot, out var error))
+            {
+                _log.Warn($"Could not create an escape directory for the active user: {error}");
+                return false;
+            }
+        }
+        else
+        {
+            tempRoot = Path.Combine(Path.GetTempPath(), "cig_" + Guid.NewGuid().ToString("N"));
+        }
+
+        var started = false;
         try
         {
             CleanupOldEscapeDirectories(tempRoot);
@@ -108,11 +122,13 @@ public sealed class ClassIslandProcessManager
             if (TryStart(copiedLauncher, asActiveUser) && WaitForSingleProcess(configuration.ClassIslandProcessName))
             {
                 _runtimeProcessName = null;
+                started = true;
                 return true;
             }
             if (TryStart(copiedApplication, asActiveUser) && WaitForSingleProcess(configuration.ClassIslandProcessName))
             {
                 _runtimeProcessName = null;
+                started = true;
                 return true;
             }
 
@@ -123,6 +139,7 @@ public sealed class ClassIslandProcessManager
             if (TryStart(renamedExe, asActiveUser) && WaitForSingleProcess(renamedExeName))
             {
                 _runtimeProcessName = renamedExeName;
+                started = true;
                 return true;
             }
 
@@ -132,6 +149,7 @@ public sealed class ClassIslandProcessManager
             if (TryStart(renamedCom, asActiveUser) && WaitForSingleProcess(renamedComName))
             {
                 _runtimeProcessName = renamedComName;
+                started = true;
                 return true;
             }
 
@@ -140,8 +158,21 @@ public sealed class ClassIslandProcessManager
         catch (Exception exception)
         {
             _log.Error("Escape launch failed", exception);
-            FileTree.DeleteIfExists(tempRoot);
             return false;
+        }
+        finally
+        {
+            if (!started)
+            {
+                try
+                {
+                    FileTree.DeleteIfExists(tempRoot);
+                }
+                catch (Exception exception)
+                {
+                    _log.Warn($"Failed to remove the unsuccessful escape directory: {exception.Message}");
+                }
+            }
         }
     }
 

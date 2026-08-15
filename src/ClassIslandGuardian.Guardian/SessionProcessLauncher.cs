@@ -1,4 +1,7 @@
 using System.Runtime.InteropServices;
+using System.Security.Principal;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 namespace ClassIslandGuardian.Guardian;
 
@@ -84,6 +87,49 @@ public static class SessionProcessLauncher
 
     public static bool HasActiveUserSession() => GetActiveSessionId() != InvalidSessionId;
 
+    public static bool TryCreateActiveUserTemporaryDirectory(string prefix, out string directory, out string? error)
+    {
+        directory = string.Empty;
+        error = null;
+        var userToken = IntPtr.Zero;
+        try
+        {
+            var sessionId = GetActiveSessionId();
+            if (sessionId == InvalidSessionId)
+            {
+                error = "No active user session is available.";
+                return false;
+            }
+
+            if (!WTSQueryUserToken(sessionId, out userToken))
+            {
+                error = $"WTSQueryUserToken failed: {Marshal.GetLastWin32Error()}";
+                return false;
+            }
+
+            if (!TryGetUserProfileDirectory(userToken, out var profileDirectory, out error))
+            {
+                return false;
+            }
+
+            using var safeToken = new SafeAccessTokenHandle(userToken);
+            userToken = IntPtr.Zero;
+            var candidate = Path.Combine(profileDirectory, "AppData", "Local", prefix + Guid.NewGuid().ToString("N"));
+            WindowsIdentity.RunImpersonated(safeToken, () => Directory.CreateDirectory(candidate));
+            directory = candidate;
+            return true;
+        }
+        catch (Exception exception)
+        {
+            error = exception.Message;
+            return false;
+        }
+        finally
+        {
+            CloseIfValid(userToken);
+        }
+    }
+
     private static uint GetActiveSessionId()
     {
         var sessions = IntPtr.Zero;
@@ -112,6 +158,29 @@ public static class SessionProcessLauncher
         }
 
         return WTSGetActiveConsoleSessionId();
+    }
+
+    private static bool TryGetUserProfileDirectory(IntPtr token, out string profileDirectory, out string? error)
+    {
+        profileDirectory = string.Empty;
+        error = null;
+        uint characterCount = 0;
+        GetUserProfileDirectory(token, null, ref characterCount);
+        if (characterCount == 0)
+        {
+            error = $"GetUserProfileDirectory failed: {Marshal.GetLastWin32Error()}";
+            return false;
+        }
+
+        var buffer = new StringBuilder((int)characterCount);
+        if (!GetUserProfileDirectory(token, buffer, ref characterCount))
+        {
+            error = $"GetUserProfileDirectory failed: {Marshal.GetLastWin32Error()}";
+            return false;
+        }
+
+        profileDirectory = buffer.ToString();
+        return true;
     }
 
     private static void CloseIfValid(IntPtr handle)
@@ -198,6 +267,10 @@ public static class SessionProcessLauncher
     [DllImport("userenv.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool DestroyEnvironmentBlock(IntPtr environment);
+
+    [DllImport("userenv.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetUserProfileDirectory(IntPtr token, StringBuilder? profileDirectory, ref uint characterCount);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
