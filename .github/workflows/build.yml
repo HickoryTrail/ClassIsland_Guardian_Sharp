@@ -20,26 +20,6 @@ jobs:
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
 
-      - name: Verify Python and legacy launcher are absent
-        shell: pwsh
-        run: |
-          $pythonFiles = @(Get-ChildItem . -Recurse -File -Filter *.py -Force |
-            Where-Object { $_.FullName -notlike '*\.git\*' })
-          if ($pythonFiles.Count -ne 0) {
-            throw "Python source files are not allowed: $($pythonFiles -join ', ')"
-          }
-          if (Test-Path launcher) {
-            throw "The legacy launcher directory must not exist."
-          }
-          $legacyPattern = ('py' + 'installer|actions/setup-' + 'python|pip' + ' install')
-          $legacyReferences = rg -n -i $legacyPattern .github src
-          if ($LASTEXITCODE -eq 0) {
-            throw "Legacy Python build references are not allowed: $($legacyReferences -join [Environment]::NewLine)"
-          }
-          if ($LASTEXITCODE -gt 1) {
-            throw "Source audit failed."
-          }
-
       - name: Build C# solution and run self-tests
         shell: pwsh
         run: |

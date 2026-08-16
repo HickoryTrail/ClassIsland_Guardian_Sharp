@@ -31,7 +31,7 @@ public sealed class SnapshotManager
             return null;
         }
 
-        if (!_processes.Kill(_processes.GetRuntimeProcessName(configuration)))
+        if (!_processes.Kill(configuration))
         {
             return null;
         }
@@ -69,7 +69,7 @@ public sealed class SnapshotManager
 
         try
         {
-            if (!_processes.Kill(_processes.GetRuntimeProcessName(configuration)))
+            if (!_processes.Kill(configuration))
             {
                 return false;
             }

@@ -1,3 +1,5 @@
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using ClassIslandGuardian.Common;
@@ -75,26 +77,46 @@ public static class ManagementPauseSignal
 
     private static void VerifyExpectedSecurity(EventWaitHandle signal)
     {
-        var security = EventWaitHandleAcl.GetAccessControl(signal);
-        var rules = security.GetAccessRules(includeExplicit: true, includeInherited: false, targetType: typeof(SecurityIdentifier))
-            .OfType<EventWaitHandleAccessRule>()
-            .ToArray();
+        var security = ReadSecurityDescriptor(signal.SafeWaitHandle);
+        var accessControlList = security.DiscretionaryAcl;
         var expectedIdentities = new[]
         {
             new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
             new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null)
         };
 
-        var isExpected = security.AreAccessRulesProtected &&
-                         rules.Length == expectedIdentities.Length &&
-                         expectedIdentities.All(identity => rules.Any(rule =>
-                             rule.AccessControlType == AccessControlType.Allow &&
-                             rule.EventWaitHandleRights == EventWaitHandleRights.FullControl &&
-                             rule.IdentityReference.Equals(identity)));
+        var isExpected = (security.ControlFlags & ControlFlags.DiscretionaryAclProtected) != 0 &&
+                         accessControlList is not null &&
+                         accessControlList.Count == expectedIdentities.Length &&
+                         expectedIdentities.All(identity => Enumerable.Range(0, accessControlList.Count).Any(index =>
+                         {
+                             return accessControlList[index] is CommonAce accessRule &&
+                                    accessRule.AceFlags == AceFlags.None &&
+                                    accessRule.AceQualifier == AceQualifier.AccessAllowed &&
+                                    accessRule.AccessMask == (int)EventWaitHandleRights.FullControl &&
+                                    accessRule.SecurityIdentifier.Equals(identity);
+                         }));
         if (!isExpected)
         {
             throw new InvalidOperationException("The management event does not have the required protected ACL.");
         }
+    }
+
+    private static RawSecurityDescriptor ReadSecurityDescriptor(Microsoft.Win32.SafeHandles.SafeWaitHandle handle)
+    {
+        if (!GetKernelObjectSecurity(handle, SecurityInformation.DiscretionaryAccessControlList, [], 0, out var length) &&
+            Marshal.GetLastPInvokeError() != ErrorInsufficientBuffer)
+        {
+            throw new Win32Exception(Marshal.GetLastPInvokeError(), "Could not read the management event security descriptor.");
+        }
+
+        var descriptor = new byte[length];
+        if (!GetKernelObjectSecurity(handle, SecurityInformation.DiscretionaryAccessControlList, descriptor, descriptor.Length, out _))
+        {
+            throw new Win32Exception(Marshal.GetLastPInvokeError(), "Could not read the management event security descriptor.");
+        }
+
+        return new RawSecurityDescriptor(descriptor, 0);
     }
 
     private static EventWaitHandleSecurity CreateSecurity()
@@ -111,6 +133,23 @@ public static class ManagementPauseSignal
             AccessControlType.Allow));
         return security;
     }
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetKernelObjectSecurity(
+        Microsoft.Win32.SafeHandles.SafeWaitHandle handle,
+        SecurityInformation requestedInformation,
+        byte[] securityDescriptor,
+        int descriptorLength,
+        out int lengthNeeded);
+
+    [Flags]
+    private enum SecurityInformation : uint
+    {
+        DiscretionaryAccessControlList = 0x00000004
+    }
+
+    private const int ErrorInsufficientBuffer = 122;
 }
 
 public sealed class ManagementPauseLease : IDisposable

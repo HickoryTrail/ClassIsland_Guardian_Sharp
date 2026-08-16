@@ -17,6 +17,7 @@ public static class Program
             ManagementPauseEventRejectsUntrustedExistingEvent();
             SnapshotCreateRestoreAndDelete();
             ApplicationSelectionPrefersCurrentThenNewestVersion();
+            ProcessIdentityRequiresConfiguredInstallationRoot();
             BcdManagerParsesEnglishAndChineseEntries();
             BcdManagerRoutesDefaultAndOneTimeCommands();
             RecoveryModeSelectionPrefersRollbackThenUpdate();
@@ -148,6 +149,20 @@ public static class Program
         Assert(ClassIslandProcessManager.FindApplicationExecutable(configuration) == Path.Combine(current, "ClassIsland.Desktop.exe"), "Current app directory should be preferred.");
         File.Delete(Path.Combine(current, ".current"));
         Assert(ClassIslandProcessManager.FindApplicationExecutable(configuration) == Path.Combine(newer, "ClassIsland.Desktop.exe"), "Newest app directory should be selected without a current marker.");
+    }
+
+    private static void ProcessIdentityRequiresConfiguredInstallationRoot()
+    {
+        using var fixture = new TemporaryDirectory();
+        var classIsland = Path.Combine(fixture.Path, "ClassIsland");
+        var trusted = Path.Combine(classIsland, "app-1.0.0.0", "ClassIsland.Desktop.exe");
+        var impostor = Path.Combine(fixture.Path, "Other", "app-1.0.0.0", "ClassIsland.Desktop.exe");
+        var nested = Path.Combine(classIsland, "app-1.0.0.0", "nested", "ClassIsland.Desktop.exe");
+
+        Assert(ClassIslandProcessManager.IsExpectedClassIslandExecutable(trusted, classIsland), "A ClassIsland executable under an app directory should be trusted.");
+        Assert(!ClassIslandProcessManager.IsExpectedClassIslandExecutable(impostor, classIsland), "A same-named executable outside the configured installation must not be trusted.");
+        Assert(!ClassIslandProcessManager.IsExpectedClassIslandExecutable(nested, classIsland), "An executable outside an immediate app directory must not be trusted.");
+        Assert(!ClassIslandProcessManager.IsExpectedClassIslandExecutable(null, classIsland), "A process with an unavailable executable path must not be trusted.");
     }
 
     private static void BcdManagerRoutesDefaultAndOneTimeCommands()

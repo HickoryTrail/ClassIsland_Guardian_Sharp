@@ -8,42 +8,86 @@ public sealed class ClassIslandProcessManager
 {
     private readonly FileLog _log;
     private string? _runtimeProcessName;
+    private string? _runtimeInstallationRoot;
 
     public ClassIslandProcessManager(FileLog log)
     {
         _log = log;
     }
 
-    public int Count(string processName)
-    {
-        var name = Path.GetFileNameWithoutExtension(processName);
-        return Process.GetProcessesByName(name).Length;
-    }
+    public int Count(GuardianConfiguration configuration) => Count(GetRuntimeProcess(configuration));
 
     public string GetRuntimeProcessName(GuardianConfiguration configuration) => _runtimeProcessName ?? configuration.ClassIslandProcessName;
 
-    public bool Kill(string processName)
+    public bool Kill(GuardianConfiguration configuration) => Kill(GetRuntimeProcess(configuration));
+
+    public static bool IsExpectedClassIslandExecutable(string? executablePath, string installationRoot)
     {
-        var name = Path.GetFileNameWithoutExtension(processName);
+        if (string.IsNullOrWhiteSpace(executablePath) || string.IsNullOrWhiteSpace(installationRoot))
+        {
+            return false;
+        }
+
+        try
+        {
+            var applicationDirectory = Directory.GetParent(Path.GetFullPath(executablePath));
+            var classIslandDirectory = applicationDirectory?.Parent;
+            return classIslandDirectory is not null &&
+                string.Equals(
+                    Path.TrimEndingDirectorySeparator(classIslandDirectory.FullName),
+                    Path.TrimEndingDirectorySeparator(Path.GetFullPath(installationRoot)),
+                    StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private int Count(ProcessIdentity expected)
+    {
+        var count = 0;
+        var name = Path.GetFileNameWithoutExtension(expected.Name);
         foreach (var process in Process.GetProcessesByName(name))
         {
-            try
+            using (process)
             {
-                process.Kill(entireProcessTree: true);
-                process.WaitForExit(5000);
+                if (IsExpectedProcess(process, expected))
+                {
+                    count++;
+                }
             }
-            catch (InvalidOperationException)
+        }
+
+        return count;
+    }
+
+    private bool Kill(ProcessIdentity expected)
+    {
+        var name = Path.GetFileNameWithoutExtension(expected.Name);
+        foreach (var process in Process.GetProcessesByName(name))
+        {
+            using (process)
             {
-                // The process exited while it was being inspected.
-            }
-            catch (Exception exception)
-            {
-                _log.Warn($"Failed to end {processName}: {exception.Message}");
-                return false;
-            }
-            finally
-            {
-                process.Dispose();
+                if (!IsExpectedProcess(process, expected))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                    process.WaitForExit(5000);
+                }
+                catch (InvalidOperationException)
+                {
+                    // The process exited while it was being inspected.
+                }
+                catch (Exception exception)
+                {
+                    _log.Warn($"Failed to end {expected.Name}: {exception.Message}");
+                    return false;
+                }
             }
         }
 
@@ -52,34 +96,16 @@ public sealed class ClassIslandProcessManager
 
     public bool Start(GuardianConfiguration configuration, bool asActiveUser)
     {
-        RemoveImageFileExecutionOptions(configuration.ClassIslandProcessName);
-        var launcher = Path.Combine(configuration.ClassIslandPath, configuration.ClassIslandLauncherName);
-        var application = FindApplicationExecutable(configuration);
-        if (!File.Exists(launcher) || application is null)
-        {
-            _log.Warn("ClassIsland executable files are missing.");
-            return false;
-        }
-
-        if (TryStart(launcher, asActiveUser) && WaitForSingleProcess(configuration.ClassIslandProcessName))
-        {
-            _runtimeProcessName = null;
-            return true;
-        }
-
-        _log.Warn("ClassIsland launcher failed; trying the application executable.");
-        if (TryStart(application, asActiveUser) && WaitForSingleProcess(configuration.ClassIslandProcessName))
-        {
-            _runtimeProcessName = null;
-            return true;
-        }
-
-        return false;
+        return StartCore(
+            configuration,
+            asActiveUser,
+            new ProcessIdentity(configuration.ClassIslandProcessName, configuration.ClassIslandPath),
+            recoverDuplicateInstances: true);
     }
 
     public bool Restart(GuardianConfiguration configuration, bool asActiveUser)
     {
-        if (!Kill(GetRuntimeProcessName(configuration)))
+        if (!Kill(GetRuntimeProcess(configuration)))
         {
             return false;
         }
@@ -119,15 +145,14 @@ public sealed class ClassIslandProcessManager
             var relativeApplication = Path.GetRelativePath(configuration.ClassIslandPath, application);
             var copiedApplication = Path.Combine(tempRoot, relativeApplication);
             var copiedLauncher = Path.Combine(tempRoot, configuration.ClassIslandLauncherName);
-            if (TryStart(copiedLauncher, asActiveUser) && WaitForSingleProcess(configuration.ClassIslandProcessName))
+            var copiedProcess = new ProcessIdentity(configuration.ClassIslandProcessName, tempRoot);
+            if (TryStartAndVerify(copiedLauncher, configuration, copiedProcess, asActiveUser, recoverDuplicateInstances: false))
             {
-                _runtimeProcessName = null;
                 started = true;
                 return true;
             }
-            if (TryStart(copiedApplication, asActiveUser) && WaitForSingleProcess(configuration.ClassIslandProcessName))
+            if (TryStartAndVerify(copiedApplication, configuration, copiedProcess, asActiveUser, recoverDuplicateInstances: false))
             {
-                _runtimeProcessName = null;
                 started = true;
                 return true;
             }
@@ -136,9 +161,13 @@ public sealed class ClassIslandProcessManager
             var renamedExe = Path.Combine(applicationDirectory, $"tmp_{Random.Shared.NextInt64():x}.exe");
             File.Copy(copiedApplication, renamedExe, overwrite: true);
             var renamedExeName = Path.GetFileName(renamedExe);
-            if (TryStart(renamedExe, asActiveUser) && WaitForSingleProcess(renamedExeName))
+            if (TryStartAndVerify(
+                renamedExe,
+                configuration,
+                new ProcessIdentity(renamedExeName, tempRoot),
+                asActiveUser,
+                recoverDuplicateInstances: false))
             {
-                _runtimeProcessName = renamedExeName;
                 started = true;
                 return true;
             }
@@ -146,9 +175,13 @@ public sealed class ClassIslandProcessManager
             var renamedCom = Path.Combine(applicationDirectory, $"tmp_{Random.Shared.NextInt64():x}.com");
             File.Copy(copiedApplication, renamedCom, overwrite: true);
             var renamedComName = Path.GetFileName(renamedCom);
-            if (TryStart(renamedCom, asActiveUser) && WaitForSingleProcess(renamedComName))
+            if (TryStartAndVerify(
+                renamedCom,
+                configuration,
+                new ProcessIdentity(renamedComName, tempRoot),
+                asActiveUser,
+                recoverDuplicateInstances: false))
             {
-                _runtimeProcessName = renamedComName;
                 started = true;
                 return true;
             }
@@ -247,17 +280,115 @@ public sealed class ClassIslandProcessManager
         }
     }
 
-    private bool WaitForSingleProcess(string processName)
+    private bool StartCore(
+        GuardianConfiguration configuration,
+        bool asActiveUser,
+        ProcessIdentity expected,
+        bool recoverDuplicateInstances)
+    {
+        RemoveImageFileExecutionOptions(configuration.ClassIslandProcessName);
+        var launcher = Path.Combine(configuration.ClassIslandPath, configuration.ClassIslandLauncherName);
+        var application = FindApplicationExecutable(configuration);
+        if (!File.Exists(launcher) || application is null)
+        {
+            _log.Warn("ClassIsland executable files are missing.");
+            return false;
+        }
+
+        if (TryStartAndVerify(launcher, configuration, expected, asActiveUser, recoverDuplicateInstances))
+        {
+            return true;
+        }
+
+        _log.Warn("ClassIsland launcher failed; trying the application executable.");
+        return TryStartAndVerify(application, configuration, expected, asActiveUser, recoverDuplicateInstances);
+    }
+
+    private bool TryStartAndVerify(
+        string path,
+        GuardianConfiguration configuration,
+        ProcessIdentity expected,
+        bool asActiveUser,
+        bool recoverDuplicateInstances)
+    {
+        if (!TryStart(path, asActiveUser))
+        {
+            return false;
+        }
+
+        var count = WaitForProcessCount(expected);
+        if (count == 1)
+        {
+            SetRuntimeProcess(configuration, expected);
+            return true;
+        }
+
+        if (count >= 2 && recoverDuplicateInstances)
+        {
+            _log.Warn($"Detected {count} ClassIsland processes after startup; restarting ClassIsland.");
+            if (Kill(expected))
+            {
+                Thread.Sleep(TimeSpan.FromSeconds(3));
+                return StartCore(configuration, asActiveUser, expected, recoverDuplicateInstances: false);
+            }
+        }
+
+        return false;
+    }
+
+    private int WaitForProcessCount(ProcessIdentity expected)
     {
         for (var attempt = 0; attempt < 5; attempt++)
         {
             Thread.Sleep(TimeSpan.FromSeconds(1));
-            if (Count(processName) == 1)
+            var count = Count(expected);
+            if (count == 1 || count >= 2)
             {
-                return true;
+                return count;
             }
         }
 
+        return 0;
+    }
+
+    private ProcessIdentity GetRuntimeProcess(GuardianConfiguration configuration)
+    {
+        return new ProcessIdentity(
+            _runtimeProcessName ?? configuration.ClassIslandProcessName,
+            _runtimeInstallationRoot ?? configuration.ClassIslandPath);
+    }
+
+    private void SetRuntimeProcess(GuardianConfiguration configuration, ProcessIdentity process)
+    {
+        _runtimeProcessName = string.Equals(process.Name, configuration.ClassIslandProcessName, StringComparison.OrdinalIgnoreCase)
+            ? null
+            : process.Name;
+        _runtimeInstallationRoot = string.Equals(
+            Path.TrimEndingDirectorySeparator(process.InstallationRoot),
+            Path.TrimEndingDirectorySeparator(configuration.ClassIslandPath),
+            StringComparison.OrdinalIgnoreCase)
+            ? null
+            : process.InstallationRoot;
+    }
+
+    private bool IsExpectedProcess(Process process, ProcessIdentity expected)
+    {
+        string? executablePath;
+        try
+        {
+            executablePath = process.MainModule?.FileName;
+        }
+        catch (Exception)
+        {
+            executablePath = null;
+        }
+
+        if (IsExpectedClassIslandExecutable(executablePath, expected.InstallationRoot))
+        {
+            return true;
+        }
+
+        _log.Warn($"Ignored an untrusted {expected.Name} process at {executablePath ?? "an unavailable executable path"}.");
         return false;
     }
 
@@ -277,4 +408,6 @@ public sealed class ClassIslandProcessManager
             }
         }
     }
+
+    private sealed record ProcessIdentity(string Name, string InstallationRoot);
 }
