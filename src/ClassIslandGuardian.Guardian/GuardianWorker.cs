@@ -98,7 +98,7 @@ public sealed class GuardianWorker : BackgroundService
                 {
                     if (!IsProtectionPaused())
                     {
-                        var count = _processes.Count(_processes.GetRuntimeProcessName(configuration));
+                        var count = _processes.Count(configuration);
                         if (count == 0)
                         {
                             await RecoverMissingProcessAsync(configuration, stoppingToken);
@@ -146,6 +146,22 @@ public sealed class GuardianWorker : BackgroundService
             return;
         }
 
+        if (_processes.Count(configuration) != 0)
+        {
+            _log.Info("ClassIsland is restarting; deferring recovery.");
+            return;
+        }
+
+        for (var attempt = 0; attempt < 4; attempt++)
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(500), stoppingToken);
+            if (_processes.Count(configuration) != 0)
+            {
+                _log.Info("ClassIsland is restarting; deferring recovery.");
+                return;
+            }
+        }
+
         _log.Warn("ClassIsland is not running; trying a normal launch.");
         if (_processes.Start(configuration, asActiveUser: true))
         {
@@ -153,7 +169,7 @@ public sealed class GuardianWorker : BackgroundService
         }
 
         _log.Warn("Normal launch failed; creating an automatic snapshot before restoration.");
-        _processes.Kill(configuration.ClassIslandProcessName);
+        _processes.Kill(configuration);
         _snapshots.Create(configuration, "自动回滚前生成的快照");
         var recoverySnapshot = _snapshots.List().FirstOrDefault(name => !name.Contains("自动回滚前生成的快照", StringComparison.Ordinal));
         if (recoverySnapshot is not null && _snapshots.Restore(configuration, recoverySnapshot) && _processes.Start(configuration, asActiveUser: true))

@@ -139,7 +139,7 @@ public static class GuardianCommandLine
             ValidatePackage(sourceGuardian, sourceRecovery, sourceDrivers);
 
             var processManager = new ClassIslandProcessManager(log);
-            processManager.Kill(configuration.ClassIslandProcessName);
+            processManager.Kill(configuration);
             Directory.CreateDirectory(paths.GuardianDirectory);
             Directory.CreateDirectory(paths.RecoveryDirectory);
             Directory.CreateDirectory(paths.GuardianDataDirectory);
